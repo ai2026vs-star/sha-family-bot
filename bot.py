@@ -33,20 +33,23 @@ def parse_with_claude(text: str, who: str) -> dict:
 
 Użytkownik napisał: "{text}"
 
-Czy to jest wydatek lub dochód? Odpowiedz TYLKO w JSON:
+Czy w tej wiadomości jest jakaś kwota pieniędzy (wydatek LUB dochód/przychód/wynagrodzenie/zarobek)?
+Odpowiedz TYLKO w JSON bez żadnego tekstu:
 
-Jeśli tak:
-{{"is_expense": true, "item": "nazwa", "amount": 10.0, "category": "Транспорт", "who": "{who}", "date": "{today}", "finance_type": "wydatek"}}
+Jeśli TAK (jest kwota):
+{{"is_expense": true, "item": "nazwa/opis", "amount": 10.0, "category": "Транспорт", "who": "{who}", "date": "{today}", "finance_type": "wydatek"}}
 
-Jeśli nie:
+Jeśli NIE (brak kwoty):
 {{"is_expense": false}}
 
 Zasady:
-- finance_type to "wydatek" lub "dochód"
+- finance_type = "wydatek" gdy kupuje/płaci/wydaje/kosztuje
+- finance_type = "dochód" gdy otrzymuje/zarabia/wynagrodzenie/wpłata/przychód/зарплата/отримав
 - category wybierz z: {", ".join(CATEGORIES)}
-- Jeśli mówi "żona"/"Lera"/"ona" to who="L", inaczej who="{who}"
-- amount to liczba bez waluty
-- Nie dodawaj żadnego tekstu poza JSON"""
+- Kategoria "Зарплата" dla wynagrodzeń i dochodów
+- Jeśli mówi "żona"/"Lera"/"она"/"дружина" to who="L", inaczej who="{who}"
+- amount to liczba (samo bez waluty)
+- item to krótka nazwa np. "Зарплата", "Аптека", "Їжа", "Парковка""""
 
     response = anthropic_client.messages.create(
         model="claude-haiku-4-5",
