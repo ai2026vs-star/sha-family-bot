@@ -2,320 +2,286 @@ import os
 import json
 import logging
 import tempfile
-from datetime import datetime
+import datetime
 from telegram import Update
-from telegram.ext import ApplicationBuilder, MessageHandler, CommandHandler, filters, ContextTypes
+from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters, ContextTypes
 import anthropic
-import httpx
-from openai import OpenAI
+from notion_client import Client as NotionClient
+from google.oauth2.credentials import Credentials
+from googleapiclient.discovery import build
+from google.auth.transport.requests import Request
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 TELEGRAM_TOKEN = os.environ["TELEGRAM_TOKEN"]
-NOTION_TOKEN = os.environ["NOTION_TOKEN"]
-NOTION_DATABASE_ID = os.environ["NOTION_DATABASE_ID"]
-ANTHROPIC_API_KEY = os.environ["ANTHROPIC_API_KEY"]
-OPENAI_API_KEY = os.environ["OPENAI_API_KEY"]
+ANTHROPIC_API_KEY = os.environ["ANTROPIC_API_KEY"]
+NOTION_TOKEN = os.environ["TOKEN_NOCJI"]
+NOTION_DATABASE_ID = os.environ["ID_BAZY_DANYCH_NOTION"]
+GOOGLE_CALENDAR_TOKEN = os.environ["TOKEN_KALENDARZA_GOOGLE"]
 
 anthropic_client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
-openai_client = OpenAI(api_key=OPENAI_API_KEY)
+notion = NotionClient(auth=NOTION_TOKEN)
 
-EXPENSE_CATEGORIES = [
-    "Продукти харчування",
-    "Охорона здоров'я",
-    "Дозвілля та розваги",
-    "Транспорт",
-    "Дитина",
-    "Дім та побут",
-    "Одяг",
-    "Кафе та ресторани",
-    "Аптека",
-    "Інше"
+USERS = {
+    "vladyslav.shapovalov.rs": "V",
+}
+
+CATEGORIES = [
+    "produkty spożywcze", "zdrowie", "rozrywka", "transport",
+    "dziecko", "dom i gospodarstwo", "odzież", "kawiarnie i restauracje",
+    "apteka", "inne"
 ]
 
-INCOME_CATEGORIES = [
-    "Зарплата",
-    "Фріланс",
-    "Бонус",
-    "Подарунок",
-    "Інший дохід"
-]
+def get_calendar_service():
+    token_data = json.loads(GOOGLE_CALENDAR_TOKEN)
+    creds = Credentials(
+        token=token_data.get("token"),
+        refresh_token=token_data.get("refresh_token"),
+        token_uri=token_data.get("token_uri"),
+        client_id=token_data.get("client_id"),
+        client_secret=token_data.get("client_secret"),
+        scopes=token_data.get("scopes"),
+    )
+    if creds.expired and creds.refresh_token:
+        creds.refresh(Request())
+    return build("calendar", "v3", credentials=creds)
 
+def parse_with_claude(text: str, username: str) -> dict:
+    today = datetime.date.today().isoformat()
+    current_year = datetime.date.today().year
+    
+    prompt = f"""Dzisiaj jest {today}. Rok: {current_year}.
 
-async def transcribe_voice(file_path: str) -> str:
-    with open(file_path, "rb") as f:
-        transcript = openai_client.audio.transcriptions.create(
-            model="whisper-1",
-            file=f
-        )
-    return transcript.text
+Przeanalizuj wiadomość użytkownika i określ czy to:
+1. WYDATEK - coś zostało kupione lub opłacone
+2. DOCHÓD - otrzymano pieniądze
+3. WYDARZENIE KALENDARZA - coś zaplanowanego na konkretną datę/godzinę
+4. NIEZNANE - nic z powyższych
 
+Wiadomość: "{text}"
+Użytkownik: {username}
 
-def parse_with_claude(text: str) -> dict:
-    expense_cats = "\n".join(f"- {c}" for c in EXPENSE_CATEGORIES)
-    income_cats = "\n".join(f"- {c}" for c in INCOME_CATEGORIES)
+Odpowiedz TYLKO w JSON (bez markdown, bez komentarzy):
 
-    prompt = f"""Ты помощник для учёта семейного бюджета. Пользователь написал: "{text}"
+Dla wydatku/dochodu:
+{{"type": "finance", "finance_type": "wydatek" lub "dochód", "item": "nazwa", "amount": liczba, "currency": "PLN", "category": "kategoria", "who": "V" lub "L", "date": "YYYY-MM-DD", "comment": ""}}
 
-Определи тип транзакции и верни JSON:
-{{
-  "amount": <число>,
-  "currency": "PLN",
-  "description": "<название>",
-  "category": "<категория>",
-  "type": "expense" или "income",
-  "is_transaction": true/false
-}}
+Dla wydarzenia kalendarza:
+{{"type": "calendar", "title": "tytuł wydarzenia", "date": "YYYY-MM-DD", "time": "HH:MM" lub null, "duration_minutes": 60, "invite_wife": true lub false, "reminder_minutes": 30, "description": ""}}
 
-Категории РАСХОДОВ:
-{expense_cats}
+Dla nieznanego:
+{{"type": "unknown"}}
 
-Категории ДОХОДОВ:
-{income_cats}
-
-Правила:
-- Если это трата/расход — type: "expense"
-- Если это доход/зарплата/получил — type: "income"
-- Если не про деньги — верни {{"is_transaction": false}}
-- currency всегда PLN если не указано другое
-- Верни ТОЛЬКО JSON, без пояснений"""
-
+Kategorie finansowe: {", ".join(CATEGORIES)}
+Żona = "L" (Lera). Jeśli wiadomość mówi "żona", "Lera", "ona" - who="L", inaczej who="{username}".
+Jeśli brak godziny dla wydarzenia - time=null.
+Jeśli napisano "jutro" - oblicz datę relative do {today}.
+"""
+    
     response = anthropic_client.messages.create(
-        model="claude-haiku-4-5-20251001",
-        max_tokens=300,
+        model="claude-opus-4-5",
+        max_tokens=500,
         messages=[{"role": "user", "content": prompt}]
     )
-    result_text = response.content[0].text.strip()
-    result_text = result_text.replace("```json", "").replace("```", "").strip()
-    return json.loads(result_text)
+    
+    raw = response.content[0].text.strip()
+    raw = raw.replace("```json", "").replace("```", "").strip()
+    return json.loads(raw)
 
-
-def add_to_notion(description: str, amount: float, currency: str, category: str, user_name: str, tx_type: str) -> bool:
-    url = "https://api.notion.com/v1/pages"
-    headers = {
-        "Authorization": f"Bearer {NOTION_TOKEN}",
-        "Content-Type": "application/json",
-        "Notion-Version": "2022-06-28"
+def add_to_notion(data: dict):
+    props = {
+        "Назва": {"title": [{"text": {"content": data["item"]}}]},
+        "Сума": {"number": data["amount"]},
+        "Валюта": {"select": {"name": data.get("currency", "PLN")}},
+        "Категорія": {"select": {"name": data.get("category", "inne")}},
+        "Дата": {"date": {"start": data["date"]}},
+        "Хто": {"select": {"name": data.get("who", "V")}},
+        "Тип": {"select": {"name": "Дохід" if data.get("finance_type") == "dochód" else "Витрата"}},
     }
-    today = datetime.now().strftime("%Y-%m-%d")
-    data = {
-        "parent": {"database_id": NOTION_DATABASE_ID},
-        "properties": {
-            "Name": {"title": [{"text": {"content": description}}]},
-            "Сума": {"number": amount},
-            "Валюта": {"select": {"name": currency}},
-            "Категорія": {"select": {"name": category}},
-            "Дата": {"date": {"start": today}},
-            "Хто": {"select": {"name": user_name}},
-            "Тип": {"select": {"name": "Дохід" if tx_type == "income" else "Витрата"}}
-        }
+    if data.get("comment"):
+        props["Коментар"] = {"rich_text": [{"text": {"content": data["comment"]}}]}
+    
+    notion.pages.create(parent={"database_id": NOTION_DATABASE_ID}, properties=props)
+
+def add_to_calendar(data: dict, invite_wife_email: str = None):
+    service = get_calendar_service()
+    
+    date_str = data["date"]
+    time_str = data.get("time")
+    duration = data.get("duration_minutes", 60)
+    
+    if time_str:
+        start_dt = datetime.datetime.strptime(f"{date_str} {time_str}", "%Y-%m-%d %H:%M")
+        end_dt = start_dt + datetime.timedelta(minutes=duration)
+        start = {"dateTime": start_dt.isoformat(), "timeZone": "Europe/Warsaw"}
+        end = {"dateTime": end_dt.isoformat(), "timeZone": "Europe/Warsaw"}
+    else:
+        start = {"date": date_str}
+        end = {"date": date_str}
+    
+    event = {
+        "summary": data["title"],
+        "description": data.get("description", ""),
+        "start": start,
+        "end": end,
+        "reminders": {
+            "useDefault": False,
+            "overrides": [
+                {"method": "popup", "minutes": data.get("reminder_minutes", 30)},
+            ],
+        },
     }
-    response = httpx.post(url, headers=headers, json=data)
-    return response.status_code == 200
-
-
-def get_monthly_report() -> dict:
-    url = f"https://api.notion.com/v1/databases/{NOTION_DATABASE_ID}/query"
-    headers = {
-        "Authorization": f"Bearer {NOTION_TOKEN}",
-        "Content-Type": "application/json",
-        "Notion-Version": "2022-06-28"
-    }
-    now = datetime.now()
-    start = f"{now.year}-{now.month:02d}-01"
-    payload = {
-        "filter": {
-            "property": "Дата",
-            "date": {"on_or_after": start}
-        }
-    }
-    response = httpx.post(url, headers=headers, json=payload)
-    if response.status_code != 200:
-        return None
-
-    results = response.json().get("results", [])
-    income = 0
-    expenses = 0
-    by_category = {}
-
-    for r in results:
-        props = r["properties"]
-        amount = props.get("Сума", {}).get("number") or 0
-        tx_type = props.get("Тип", {}).get("select", {})
-        tx_type_name = tx_type.get("name", "") if tx_type else ""
-        category = props.get("Категорія", {}).get("select", {})
-        cat_name = category.get("name", "Інше") if category else "Інше"
-
-        if tx_type_name == "Дохід":
-            income += amount
-        else:
-            expenses += amount
-            by_category[cat_name] = by_category.get(cat_name, 0) + amount
-
-    return {
-        "income": income,
-        "expenses": expenses,
-        "balance": income - expenses,
-        "by_category": by_category
-    }
-
-
-def get_today_expenses() -> list:
-    url = f"https://api.notion.com/v1/databases/{NOTION_DATABASE_ID}/query"
-    headers = {
-        "Authorization": f"Bearer {NOTION_TOKEN}",
-        "Content-Type": "application/json",
-        "Notion-Version": "2022-06-28"
-    }
-    today = datetime.now().strftime("%Y-%m-%d")
-    payload = {
-        "filter": {
-            "property": "Дата",
-            "date": {"equals": today}
-        }
-    }
-    response = httpx.post(url, headers=headers, json=payload)
-    if response.status_code != 200:
-        return []
-
-    results = response.json().get("results", [])
-    items = []
-    for r in results:
-        props = r["properties"]
-        name = props.get("Name", {}).get("title", [{}])
-        name = name[0].get("text", {}).get("content", "?") if name else "?"
-        amount = props.get("Сума", {}).get("number") or 0
-        tx_type = props.get("Тип", {}).get("select", {})
-        tx_type_name = tx_type.get("name", "Витрата") if tx_type else "Витрата"
-        items.append({"name": name, "amount": amount, "type": tx_type_name})
-    return items
-
-
-async def process_text(text: str, user_name: str, update: Update):
-    try:
-        parsed = parse_with_claude(text)
-        if not parsed.get("is_transaction"):
-            await update.message.reply_text("Не понял 🤔 Напиши например:\n• потратил 50 злотых на продукты\n• получил зарплату 3000 PLN")
-            return
-
-        tx_type = parsed.get("type", "expense")
-        success = add_to_notion(
-            parsed["description"],
-            parsed["amount"],
-            parsed.get("currency", "PLN"),
-            parsed["category"],
-            user_name,
-            tx_type
-        )
-
-        if success:
-            emoji = "💰" if tx_type == "income" else "💸"
-            type_label = "Дохід записано!" if tx_type == "income" else "Витрату записано!"
-            await update.message.reply_text(
-                f"✅ {type_label}\n\n"
-                f"📝 {parsed['description']}\n"
-                f"{emoji} {parsed['amount']} {parsed.get('currency', 'PLN')}\n"
-                f"🏷 {parsed['category']}\n"
-                f"👤 {user_name}"
-            )
-        else:
-            await update.message.reply_text("❌ Помилка запису в Notion.")
-    except Exception as e:
-        logger.error(f"Error: {e}")
-        await update.message.reply_text("❌ Щось пішло не так. Спробуй ще раз.")
-
-
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    name = update.effective_user.first_name or "друг"
-    await update.message.reply_text(
-        f"Привет, {name}! 👋\n\n"
-        "Напиши или надиктуй трату или доход:\n\n"
-        "💸 Расходы:\n"
-        "• потратил 45 злотых на продукты\n"
-        "• парковка 5 PLN\n\n"
-        "💰 Доходы:\n"
-        "• получил зарплату 3000 PLN\n"
-        "• фриланс 500 злотых\n\n"
-        "📊 Команды:\n"
-        "/raport — отчёт за месяц\n"
-        "/dzisiaj — траты сегодня"
-    )
-
-
-async def raport(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
-    data = get_monthly_report()
-    if not data:
-        await update.message.reply_text("❌ Не удалось получить данные.")
-        return
-
-    now = datetime.now()
-    month_name = now.strftime("%B %Y")
-
-    cats = ""
-    for cat, amount in sorted(data["by_category"].items(), key=lambda x: -x[1]):
-        cats += f"  • {cat}: {amount:.0f} PLN\n"
-
-    balance_emoji = "📈" if data["balance"] >= 0 else "📉"
-
-    await update.message.reply_text(
-        f"📊 Отчёт за {month_name}:\n\n"
-        f"💰 Доходы: {data['income']:.0f} PLN\n"
-        f"💸 Расходы: {data['expenses']:.0f} PLN\n"
-        f"{balance_emoji} Баланс: {data['balance']:.0f} PLN\n\n"
-        f"📂 По категориям:\n{cats}"
-    )
-
-
-async def dzisiaj(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
-    items = get_today_expenses()
-    if not items:
-        await update.message.reply_text("Сегодня ещё ничего не записано 🙂")
-        return
-
-    total_exp = sum(i["amount"] for i in items if i["type"] == "Витрата")
-    total_inc = sum(i["amount"] for i in items if i["type"] == "Дохід")
-
-    lines = ""
-    for i in items:
-        emoji = "💰" if i["type"] == "Дохід" else "💸"
-        lines += f"{emoji} {i['name']}: {i['amount']:.0f} PLN\n"
-
-    msg = f"📅 Сегодня:\n\n{lines}"
-    if total_exp > 0:
-        msg += f"\n💸 Итого расходов: {total_exp:.0f} PLN"
-    if total_inc > 0:
-        msg += f"\n💰 Итого доходов: {total_inc:.0f} PLN"
-
-    await update.message.reply_text(msg)
-
+    
+    if data.get("invite_wife") and invite_wife_email:
+        event["attendees"] = [{"email": invite_wife_email}]
+    
+    result = service.events().insert(calendarId="primary", body=event).execute()
+    return result.get("htmlLink", "")
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_name = update.effective_user.first_name or "Невідомо"
+    user = update.effective_user
+    username_raw = user.username or user.first_name or "V"
+    
+    if "lera" in username_raw.lower() or "shapovalova" in username_raw.lower():
+        who = "L"
+    else:
+        who = "V"
+    
     text = update.message.text
-    await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
-    await process_text(text, user_name, update)
-
+    
+    try:
+        data = parse_with_claude(text, who)
+        
+        if data["type"] == "finance":
+            add_to_notion(data)
+            emoji = "💸" if data["finance_type"] == "wydatek" else "💰"
+            sign = "-" if data["finance_type"] == "wydatek" else "+"
+            await update.message.reply_text(
+                f"{emoji} Zapisano!\n{sign}{data['amount']} {data.get('currency','PLN')} — {data['item']}\n📂 {data.get('category','inne')} | 👤 {data.get('who','?')} | 📅 {data['date']}"
+            )
+        
+        elif data["type"] == "calendar":
+            wife_email = os.environ.get("WIFE_EMAIL", "")
+            link = add_to_calendar(data, wife_email if data.get("invite_wife") else None)
+            
+            time_info = f" o {data['time']}" if data.get("time") else ""
+            invite_info = " + zaproszenie dla żony 👩" if data.get("invite_wife") else ""
+            await update.message.reply_text(
+                f"📅 Dodano do kalendarza!\n{data['title']}\n🗓 {data['date']}{time_info}{invite_info}\n⏰ Przypomnienie: {data.get('reminder_minutes', 30)} min wcześniej"
+            )
+        
+        else:
+            await update.message.reply_text(
+                "Nie rozumiem 🤔 Powiedz mi o wydatku (np. 'kupiłem chleb 5 zł') lub wydarzeniu (np. 'wizyta u lekarza jutro o 10')."
+            )
+    
+    except Exception as e:
+        logger.error(f"Błąd: {e}")
+        await update.message.reply_text("Coś poszło nie tak, spróbuj jeszcze raz.")
 
 async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_name = update.effective_user.first_name or "Невідомо"
-    await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
     try:
         voice = update.message.voice
         file = await context.bot.get_file(voice.file_id)
+        
         with tempfile.NamedTemporaryFile(suffix=".ogg", delete=False) as tmp:
+            await file.download_to_drive(tmp.name)
             tmp_path = tmp.name
-        await file.download_to_drive(tmp_path)
-        text = await transcribe_voice(tmp_path)
+        
+        with open(tmp_path, "rb") as audio_file:
+            import httpx
+            response = httpx.post(
+                "https://api.openai.com/v1/audio/transcriptions",
+                headers={"Authorization": f"Bearer {os.environ.get('OPENAI_API_KEY', '')}"},
+                files={"file": ("voice.ogg", audio_file, "audio/ogg")},
+                data={"model": "whisper-1", "language": "pl"},
+                timeout=30
+            )
+        
         os.unlink(tmp_path)
-        logger.info(f"Transcribed: {text}")
-        await process_text(text, user_name, update)
+        
+        if response.status_code == 200:
+            text = response.json().get("text", "")
+            if text:
+                update.message.text = text
+                await handle_message(update, context)
+            else:
+                await update.message.reply_text("Nie udało się rozpoznać mowy.")
+        else:
+            await update.message.reply_text("Błąd transkrypcji głosu.")
+    
     except Exception as e:
-        logger.error(f"Voice error: {e}")
-        await update.message.reply_text("❌ Не смог распознать голос. Попробуй ещё раз.")
+        logger.error(f"Błąd głosu: {e}")
+        await update.message.reply_text("Nie mogę przetworzyć wiadomości głosowej.")
 
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        "Cześć! 👋 Jestem twoim asystentem rodzinnym.\n\n"
+        "💸 Powiedz mi o wydatku: 'kupiłem chleb 5 zł'\n"
+        "💰 Lub o dochodzie: 'otrzymałem wynagrodzenie 5000 zł'\n"
+        "📅 Lub o wydarzeniu: 'wizyta u lekarza w piątek o 10'\n\n"
+        "Możesz pisać lub nagrywać głosówki!"
+    )
+
+async def raport(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    try:
+        now = datetime.datetime.now()
+        month_start = datetime.date(now.year, now.month, 1).isoformat()
+        
+        results = notion.databases.query(
+            database_id=NOTION_DATABASE_ID,
+            filter={"property": "Дата", "date": {"on_or_after": month_start}}
+        )
+        
+        wydatki = sum(p["properties"]["Сума"]["number"] or 0 
+                     for p in results["results"] 
+                     if p["properties"].get("Тип", {}).get("select", {}).get("name") == "Витрата")
+        dochody = sum(p["properties"]["Сума"]["number"] or 0 
+                     for p in results["results"] 
+                     if p["properties"].get("Тип", {}).get("select", {}).get("name") == "Дохід")
+        
+        await update.message.reply_text(
+            f"📊 Raport za {now.strftime('%B %Y')}:\n"
+            f"💰 Dochody: {dochody:.2f} PLN\n"
+            f"💸 Wydatki: {wydatki:.2f} PLN\n"
+            f"💵 Bilans: {dochody - wydatki:.2f} PLN"
+        )
+    except Exception as e:
+        logger.error(f"Błąd raportu: {e}")
+        await update.message.reply_text("Błąd pobierania raportu.")
+
+async def dzisiaj(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    try:
+        today = datetime.date.today().isoformat()
+        results = notion.databases.query(
+            database_id=NOTION_DATABASE_ID,
+            filter={"property": "Дата", "date": {"equals": today}}
+        )
+        
+        if not results["results"]:
+            await update.message.reply_text(f"📅 Dzisiaj ({today}) brak zapisów.")
+            return
+        
+        lines = [f"📅 Dzisiaj ({today}):"]
+        total = 0
+        for p in results["results"]:
+            name = p["properties"]["Назва"]["title"][0]["text"]["content"] if p["properties"]["Назва"]["title"] else "?"
+            amount = p["properties"]["Сума"]["number"] or 0
+            typ = p["properties"].get("Тип", {}).get("select", {}).get("name", "")
+            sign = "-" if typ == "Витрата" else "+"
+            lines.append(f"{sign}{amount} PLN — {name}")
+            if typ == "Витрата":
+                total -= amount
+            else:
+                total += amount
+        
+        lines.append(f"\nBilans: {total:.2f} PLN")
+        await update.message.reply_text("\n".join(lines))
+    
+    except Exception as e:
+        logger.error(f"Błąd dzisiaj: {e}")
+        await update.message.reply_text("Błąd pobierania danych.")
 
 def main():
     app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
@@ -324,9 +290,8 @@ def main():
     app.add_handler(CommandHandler("dzisiaj", dzisiaj))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     app.add_handler(MessageHandler(filters.VOICE, handle_voice))
-    logger.info("Bot started!")
+    logger.info("Bot uruchomiony!")
     app.run_polling()
-
 
 if __name__ == "__main__":
     main()
