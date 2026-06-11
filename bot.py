@@ -96,7 +96,7 @@ Jeśli napisano "jutro" - oblicz datę relative do {today}.
 
 def add_to_notion(data: dict):
     props = {
-        "Назва": {"title": [{"text": {"content": data["item"]}}]},
+        "Name": {"title": [{"text": {"content": data["item"]}}]},
         "Сума": {"number": data["amount"]},
         "Валюта": {"select": {"name": data.get("currency", "PLN")}},
         "Категорія": {"select": {"name": data.get("category", "inne")}},
