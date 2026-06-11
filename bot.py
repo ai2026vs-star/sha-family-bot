@@ -36,21 +36,14 @@ def parse_expense_with_claude(text: str) -> dict:
     prompt = f"""Ты помощник для учёта расходов семьи. Пользователь написал: "{text}"
 
 Извлеки информацию о трате и верни JSON:
-{{
-  "amount": <число>,
-  "currency": "PLN",
-  "description": "<название покупки>",
-  "category": "<категория из списка>",
-  "is_expense": true/false
-}}
+{{"amount": <число>, "currency": "PLN", "description": "<название>", "category": "<категория>", "is_expense": true/false}}
 
-Доступные категории:
+Категории:
 {categories_str}
 
 Правила:
-- Если сообщение не про трату — верни {{"is_expense": false}}
+- Если не про трату — верни {{"is_expense": false}}
 - currency всегда PLN если не указано другое
-- description — краткое название (1-4 слова)
 - Верни ТОЛЬКО JSON, без пояснений"""
 
     response = anthropic_client.messages.create(
@@ -58,7 +51,9 @@ def parse_expense_with_claude(text: str) -> dict:
         max_tokens=300,
         messages=[{"role": "user", "content": prompt}]
     )
-    result_text = response.content[0].text.strip()
+    
+    block = response.content[0]
+    result_text = block.text.strip()
     result_text = result_text.replace("```json", "").replace("```", "").strip()
     return json.loads(result_text)
 
@@ -117,7 +112,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"👤 {user_name}"
             )
         else:
-            await update.message.reply_text("❌ Ошибка записи в Notion. Попробуй ещё раз.")
+            await update.message.reply_text("❌ Ошибка записи в Notion.")
     except Exception as e:
         logger.error(f"Error: {e}")
         await update.message.reply_text("❌ Что-то пошло не так. Попробуй ещё раз.")
