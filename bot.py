@@ -81,7 +81,7 @@ Jeśli napisano "jutro" - oblicz datę relative do {today}.
 """
     
     response = anthropic_client.messages.create(
-        model="claude-opus-4-5",
+        model="claude-sonnet-4-5",
         max_tokens=500,
         messages=[{"role": "user", "content": prompt}]
     )
