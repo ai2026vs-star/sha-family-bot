@@ -1,11 +1,13 @@
 import os
 import json
 import logging
+import tempfile
 from datetime import datetime
 from telegram import Update
 from telegram.ext import ApplicationBuilder, MessageHandler, CommandHandler, filters, ContextTypes
 import anthropic
 import httpx
+from openai import OpenAI
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -14,6 +16,10 @@ TELEGRAM_TOKEN = os.environ["TELEGRAM_TOKEN"]
 NOTION_TOKEN = os.environ["NOTION_TOKEN"]
 NOTION_DATABASE_ID = os.environ["NOTION_DATABASE_ID"]
 ANTHROPIC_API_KEY = os.environ["ANTHROPIC_API_KEY"]
+OPENAI_API_KEY = os.environ["OPENAI_API_KEY"]
+
+anthropic_client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
+openai_client = OpenAI(api_key=OPENAI_API_KEY)
 
 CATEGORIES = [
     "Продукти харчування",
@@ -28,7 +34,14 @@ CATEGORIES = [
     "Інше"
 ]
 
-anthropic_client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
+
+async def transcribe_voice(file_path: str) -> str:
+    with open(file_path, "rb") as f:
+        transcript = openai_client.audio.transcriptions.create(
+            model="whisper-1",
+            file=f
+        )
+    return transcript.text
 
 
 def parse_expense_with_claude(text: str) -> dict:
@@ -51,7 +64,6 @@ def parse_expense_with_claude(text: str) -> dict:
         max_tokens=300,
         messages=[{"role": "user", "content": prompt}]
     )
-    
     block = response.content[0]
     result_text = block.text.strip()
     result_text = result_text.replace("```json", "").replace("```", "").strip()
@@ -81,22 +93,7 @@ def add_to_notion(description: str, amount: float, currency: str, category: str,
     return response.status_code == 200
 
 
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    name = update.effective_user.first_name or "друг"
-    await update.message.reply_text(
-        f"Привет, {name}! 👋\n\n"
-        "Просто напиши что потратил:\n"
-        "• потратил 45 злотых на продукты\n"
-        "• парковка 5 PLN\n"
-        "• кофе 12 злотых\n\n"
-        "Я запишу в Notion 📊"
-    )
-
-
-async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_name = update.effective_user.first_name or "Неизвестно"
-    text = update.message.text
-    await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
+async def process_text(text: str, user_name: str, update: Update):
     try:
         parsed = parse_expense_with_claude(text)
         if not parsed.get("is_expense"):
@@ -118,10 +115,53 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❌ Что-то пошло не так. Попробуй ещё раз.")
 
 
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    name = update.effective_user.first_name or "друг"
+    await update.message.reply_text(
+        f"Привет, {name}! 👋\n\n"
+        "Напиши или надиктуй что потратил:\n"
+        "• потратил 45 злотых на продукты\n"
+        "• парковка 5 PLN\n"
+        "• кофе 12 злотых\n\n"
+        "Я запишу в Notion 📊"
+    )
+
+
+async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_name = update.effective_user.first_name or "Неизвестно"
+    text = update.message.text
+    await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
+    await process_text(text, user_name, update)
+
+
+async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_name = update.effective_user.first_name or "Неизвестно"
+    await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
+
+    try:
+        voice = update.message.voice
+        file = await context.bot.get_file(voice.file_id)
+
+        with tempfile.NamedTemporaryFile(suffix=".ogg", delete=False) as tmp:
+            tmp_path = tmp.name
+
+        await file.download_to_drive(tmp_path)
+        text = await transcribe_voice(tmp_path)
+        os.unlink(tmp_path)
+
+        logger.info(f"Transcribed: {text}")
+        await process_text(text, user_name, update)
+
+    except Exception as e:
+        logger.error(f"Voice error: {e}")
+        await update.message.reply_text("❌ Не смог распознать голос. Попробуй ещё раз.")
+
+
 def main():
     app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+    app.add_handler(MessageHandler(filters.VOICE, handle_voice))
     logger.info("Bot started!")
     app.run_polling()
 
