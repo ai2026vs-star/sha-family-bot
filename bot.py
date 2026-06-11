@@ -15,10 +15,11 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 TELEGRAM_TOKEN = os.environ["TELEGRAM_TOKEN"]
-ANTHROPIC_API_KEY = os.environ["ANTROPIC_API_KEY"]
-NOTION_TOKEN = os.environ["TOKEN_NOCJI"]
-NOTION_DATABASE_ID = os.environ["ID_BAZY_DANYCH_NOTION"]
-GOOGLE_CALENDAR_TOKEN = os.environ["TOKEN_KALENDARZA_GOOGLE"]
+ANTHROPIC_API_KEY = os.environ["ANTHROPIC_API_KEY"]
+NOTION_TOKEN = os.environ["NOTION_TOKEN"]
+NOTION_DATABASE_ID = os.environ["NOTION_DATABASE_ID"]
+GOOGLE_CALENDAR_TOKEN = os.environ["GOOGLE_CALENDAR_TOKEN"]
+WIFE_EMAIL = os.environ.get("WIFE_EMAIL", "")
 
 anthropic_client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
 notion = NotionClient(auth=NOTION_TOKEN)
@@ -162,7 +163,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
         
         elif data["type"] == "calendar":
-            wife_email = os.environ.get("WIFE_EMAIL", "")
+            wife_email = WIFE_EMAIL
             link = add_to_calendar(data, wife_email if data.get("invite_wife") else None)
             
             time_info = f" o {data['time']}" if data.get("time") else ""
