@@ -29,9 +29,9 @@ USERS = {
 }
 
 CATEGORIES = [
-    "produkty spożywcze", "zdrowie", "rozrywka", "transport",
-    "dziecko", "dom i gospodarstwo", "odzież", "kawiarnie i restauracje",
-    "apteka", "inne"
+    "Продукти харчування", "Охорона здоров'я", "Дозвілля та розваги", "Транспорт",
+    "Дитина", "Дім та побут", "Одяг", "Кафе та ресторани",
+    "Аптека", "Інше", "Зарплата"
 ]
 
 def get_calendar_service():
