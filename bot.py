@@ -88,6 +88,10 @@ Jeśli napisano "jutro" - oblicz datę relative do {today}.
     
     raw = response.content[0].text.strip()
     raw = raw.replace("```json", "").replace("```", "").strip()
+    start = raw.find("{")
+    end = raw.rfind("}") + 1
+    if start >= 0 and end > start:
+        raw = raw[start:end]
     return json.loads(raw)
 
 def add_to_notion(data: dict):
