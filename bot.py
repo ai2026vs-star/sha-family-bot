@@ -27,34 +27,43 @@ CATEGORIES = [
     "Аптека", "Інше", "Зарплата"
 ]
 
+WIFE_USERNAMES = ["valeriia_photo", "lera", "shapovalova"]
+
+def get_who(username: str) -> str:
+    username = username.lower()
+    for w in WIFE_USERNAMES:
+        if w in username:
+            return "L"
+    return "V"
+
 def parse_with_claude(text: str, who: str) -> dict:
     today = datetime.date.today().isoformat()
-    prompt = f"""Dzisiaj jest {today}.
-
-Użytkownik napisał: "{text}"
-
-Czy w tej wiadomości jest jakaś kwota pieniędzy (wydatek LUB dochód/przychód/wynagrodzenie/zarobek)?
-Odpowiedz TYLKO w JSON bez żadnego tekstu:
-
-Jeśli TAK (jest kwota):
-{{"is_expense": true, "item": "nazwa/opis", "amount": 10.0, "category": "Транспорт", "who": "{who}", "date": "{today}", "finance_type": "wydatek"}}
-
-Jeśli NIE (brak kwoty):
-{{"is_expense": false}}
-
-Zasady:
-- finance_type = "wydatek" gdy kupuje/płaci/wydaje/kosztuje
-- finance_type = "dochód" gdy otrzymuje/zarabia/wynagrodzenie/wpłata/przychód/зарплата/отримав
-- category wybierz z: {", ".join(CATEGORIES)}
-- Kategoria "Зарплата" dla wynagrodzeń i dochodów
-- Jeśli mówi "żona"/"Lera"/"она"/"дружина" to who="L", inaczej who="{who}"
-- amount to liczba (samo bez waluty)
-- item to krótka nazwa np. "Зарплата", "Аптека", "Їжа", "Парковка""""
-
+    categories_str = ", ".join(CATEGORIES)
+    
+    system_prompt = "Ты помощник для учёта финансов. Отвечай ТОЛЬКО валидным JSON без пояснений."
+    
+    user_prompt = (
+        f"Сегодня {today}.\n"
+        f"Пользователь написал: {text}\n\n"
+        f"Определи: это финансовая операция (расход или доход)?\n\n"
+        f"Если ДА, ответь:\n"
+        f'{{\"is_expense\": true, \"item\": \"название\", \"amount\": 10.0, \"category\": \"Транспорт\", \"who\": \"{who}\", \"date\": \"{today}\", \"finance_type\": \"wydatek\"}}\n\n'
+        f"Если НЕТ, ответь:\n"
+        f'{{\"is_expense\": false}}\n\n'
+        f"Правила:\n"
+        f"- finance_type = wydatek (расход/купил/потратил)\n"
+        f"- finance_type = dochod (доход/зарплата/получил/заработал)\n"
+        f"- category из списка: {categories_str}\n"
+        f"- Зарплата/доходы -> category = Зарплата\n"
+        f"- Если упоминается жена/Лера/дружина -> who = L, иначе who = {who}\n"
+        f"- amount - только число"
+    )
+    
     response = anthropic_client.messages.create(
         model="claude-haiku-4-5",
         max_tokens=200,
-        messages=[{"role": "user", "content": prompt}]
+        system=system_prompt,
+        messages=[{"role": "user", "content": user_prompt}]
     )
     
     raw = response.content[0].text.strip()
@@ -81,30 +90,35 @@ async def process_text(text: str, who: str, update: Update):
         
         if data.get("is_expense"):
             add_to_notion(data)
-            emoji = "💸" if data.get("finance_type") == "wydatek" else "💰"
-            sign = "-" if data.get("finance_type") == "wydatek" else "+"
+            ft = data.get("finance_type", "wydatek")
+            emoji = "💰" if ft == "dochod" else "💸"
+            sign = "+" if ft == "dochod" else "-"
             await update.message.reply_text(
-                f"{emoji} Zapisano!\n{sign}{data['amount']} PLN — {data['item']}\n"
+                f"{emoji} Zapisano!\n"
+                f"{sign}{data['amount']} PLN — {data['item']}\n"
                 f"📂 {data.get('category', '?')} | 👤 {data.get('who', '?')} | 📅 {data['date']}"
             )
         else:
             await update.message.reply_text(
-                "Nie rozumiem 🤔\nNapisz np.:\n• 'kupiłem chleb 5 zł'\n• 'apteka 19 PLN'"
+                "Не розумію 🤔\nНапишіть наприклад:\n"
+                "• куплю хліб 5 зл\n"
+                "• аптека 19 PLN\n"
+                "• зарплата 5000 зл"
             )
     except Exception as e:
         logger.error(f"Błąd: {e}")
-        await update.message.reply_text("Coś poszło nie tak, spróbuj jeszcze raz.")
+        await update.message.reply_text("Щось пішло не так, спробуй ще раз.")
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
-    username = (user.username or "").lower()
-    who = "L" if ("lera" in username or "shapovalova" in username or "valeriia_photo" in username) else "V"
+    username = user.username or ""
+    who = get_who(username)
     await process_text(update.message.text, who, update)
 
 async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
-    username = (user.username or "").lower()
-    who = "L" if ("lera" in username or "shapovalova" in username or "valeriia_photo" in username) else "V"
+    username = user.username or ""
+    who = get_who(username)
     
     try:
         voice = update.message.voice
@@ -131,21 +145,21 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if text:
                 await process_text(text, who, update)
             else:
-                await update.message.reply_text("Nie udało się rozpoznać mowy.")
+                await update.message.reply_text("Не вдалося розпізнати мову.")
         else:
-            logger.error(f"Whisper error: {response.status_code} {response.text}")
-            await update.message.reply_text("Błąd transkrypcji głosu.")
+            logger.error(f"Whisper error: {response.status_code}")
+            await update.message.reply_text("Помилка транскрипції.")
     
     except Exception as e:
         logger.error(f"Błąd głosu: {e}")
-        await update.message.reply_text("Nie mogę przetworzyć wiadomości głosowej.")
+        await update.message.reply_text("Не можу обробити голосове повідомлення.")
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "Cześć! 👋\n\n"
-        "💸 Wydatek: 'kupiłem chleb 5 zł'\n"
-        "💰 Dochód: 'otrzymałem wynagrodzenie 5000 zł'\n\n"
-        "Pisz lub nagrywaj głosówki!"
+        "Привіт! 👋\n\n"
+        "💸 Витрата: купив хліб 5 зл\n"
+        "💰 Дохід: зарплата 5000 зл\n\n"
+        "Пиши або записуй голосові!"
     )
 
 async def raport(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -158,10 +172,10 @@ async def raport(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         total = sum(p["properties"]["Сума"]["number"] or 0 for p in results["results"])
         count = len(results["results"])
-        await update.message.reply_text(f"📊 Ten miesiąc: {count} transakcji, {total:.2f} PLN")
+        await update.message.reply_text(f"📊 Цей місяць: {count} записів, {total:.2f} PLN")
     except Exception as e:
         logger.error(f"Błąd raportu: {e}")
-        await update.message.reply_text("Błąd pobierania raportu.")
+        await update.message.reply_text("Помилка отримання звіту.")
 
 def main():
     app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
