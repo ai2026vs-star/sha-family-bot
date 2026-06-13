@@ -98,13 +98,13 @@ async def process_text(text: str, who: str, update: Update):
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     username = (user.username or "").lower()
-    who = "L" if ("lera" in username or "shapovalova" in username) else "V"
+    who = "L" if ("lera" in username or "shapovalova" in username or "valeriia_photo" in username) else "V"
     await process_text(update.message.text, who, update)
 
 async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     username = (user.username or "").lower()
-    who = "L" if ("lera" in username or "shapovalova" in username) else "V"
+    who = "L" if ("lera" in username or "shapovalova" in username or "valeriia_photo" in username) else "V"
     
     try:
         voice = update.message.voice
